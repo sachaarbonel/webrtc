@@ -105,6 +105,7 @@ type SettingEngine struct {
 	fireOnTrackBeforeFirstRTP                 bool
 	disableCloseByDTLS                        bool
 	dataChannelBlockWrite                     bool
+	iceTrickle                                bool
 }
 
 func (e *SettingEngine) getSCTPMaxMessageSize() uint32 {
@@ -539,4 +540,11 @@ func (e *SettingEngine) SetFireOnTrackBeforeFirstRTP(fireOnTrackBeforeFirstRTP b
 // and relies on the ice failed state to detect the connection is interrupted.
 func (e *SettingEngine) DisableCloseByDTLS(isEnabled bool) {
 	e.disableCloseByDTLS = isEnabled
+}
+
+// EnableICETrickle enables ICE trickle as per RFC 8838
+// When enabled, the ICE Agent will emit ICE candidates when they are gathered and
+// include the ice-options:trickle attribute in the SDP.
+func (e *SettingEngine) EnableICETrickle(enable bool) {
+	e.iceTrickle = enable
 }

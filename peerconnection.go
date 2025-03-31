@@ -620,123 +620,134 @@ func (pc *PeerConnection) hasLocalDescriptionChanged(desc *SessionDescription) b
 func (pc *PeerConnection) CreateOffer(options *OfferOptions) (SessionDescription, error) {
 	useIdentity := pc.idpLoginURL != nil
 	switch {
+	case options != nil && options.ICERestart && pc.RemoteDescription() == nil:
+		return SessionDescription{}, &rtcerr.InvalidStateError{Err: ErrNoRemoteDescription}
 	case useIdentity:
 		return SessionDescription{}, errIdentityProviderNotImplemented
 	case pc.isClosed.get():
 		return SessionDescription{}, &rtcerr.InvalidStateError{Err: ErrConnectionClosed}
 	}
 
-	if options != nil && options.ICERestart {
-		if err := pc.iceTransport.restart(); err != nil {
-			return SessionDescription{}, err
-		}
+	// If ICETrickle is specified, enable ICE trickle in the setting engine
+	if options != nil && options.ICETrickle {
+		pc.api.settingEngine.EnableICETrickle(true)
 	}
 
-	var (
-		descr *sdp.SessionDescription
-		offer SessionDescription
-		err   error
-	)
-
-	// This may be necessary to recompute if, for example, createOffer was called when only an
-	// audio RTCRtpTransceiver was added to connection, but while performing the in-parallel
-	// steps to create an offer, a video RTCRtpTransceiver was added, requiring additional
-	// inspection of video system resources.
-	count := 0
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
+	// for pc.RemoteDescription() == nil, SetLocalDescription will apply ICERestart (if desired)
+	// for the first initial offer
 	for {
-		// We cache current transceivers to ensure they aren't
-		// mutated during offer generation. We later check if they have
-		// been mutated and recompute the offer if necessary.
-		currentTransceivers := pc.rtpTransceivers
-
-		// in-parallel steps to create an offer
-		// https://w3c.github.io/webrtc-pc/#dfn-in-parallel-steps-to-create-an-offer
-		isPlanB := pc.configuration.SDPSemantics == SDPSemanticsPlanB
-		if pc.currentRemoteDescription != nil && isPlanB {
-			isPlanB = descriptionPossiblyPlanB(pc.currentRemoteDescription)
+		if options != nil && options.ICERestart {
+			if err := pc.iceTransport.restart(); err != nil {
+				return SessionDescription{}, err
+			}
 		}
 
-		// include unmatched local transceivers
-		if !isPlanB { //nolint:nestif
-			// update the greater mid if the remote description provides a greater one
-			if pc.currentRemoteDescription != nil {
-				var numericMid int
-				for _, media := range pc.currentRemoteDescription.parsed.MediaDescriptions {
-					mid := getMidValue(media)
-					if mid == "" {
-						continue
-					}
-					numericMid, err = strconv.Atoi(mid)
-					if err != nil {
-						continue
-					}
-					if numericMid > pc.greaterMid {
-						pc.greaterMid = numericMid
-					}
-				}
+		var (
+			descr *sdp.SessionDescription
+			offer SessionDescription
+			err   error
+		)
+
+		// This may be necessary to recompute if, for example, createOffer was called when only an
+		// audio RTCRtpTransceiver was added to connection, but while performing the in-parallel
+		// steps to create an offer, a video RTCRtpTransceiver was added, requiring additional
+		// inspection of video system resources.
+		count := 0
+		pc.mu.Lock()
+		defer pc.mu.Unlock()
+		for {
+			// We cache current transceivers to ensure they aren't
+			// mutated during offer generation. We later check if they have
+			// been mutated and recompute the offer if necessary.
+			currentTransceivers := pc.rtpTransceivers
+
+			// in-parallel steps to create an offer
+			// https://w3c.github.io/webrtc-pc/#dfn-in-parallel-steps-to-create-an-offer
+			isPlanB := pc.configuration.SDPSemantics == SDPSemanticsPlanB
+			if pc.currentRemoteDescription != nil && isPlanB {
+				isPlanB = descriptionPossiblyPlanB(pc.currentRemoteDescription)
 			}
-			for _, t := range currentTransceivers {
-				if mid := t.Mid(); mid != "" {
-					numericMid, errMid := strconv.Atoi(mid)
-					if errMid == nil {
+
+			// include unmatched local transceivers
+			if !isPlanB { //nolint:nestif
+				// update the greater mid if the remote description provides a greater one
+				if pc.currentRemoteDescription != nil {
+					var numericMid int
+					for _, media := range pc.currentRemoteDescription.parsed.MediaDescriptions {
+						mid := getMidValue(media)
+						if mid == "" {
+							continue
+						}
+						numericMid, err = strconv.Atoi(mid)
+						if err != nil {
+							continue
+						}
 						if numericMid > pc.greaterMid {
 							pc.greaterMid = numericMid
 						}
 					}
+				}
+				for _, t := range currentTransceivers {
+					if mid := t.Mid(); mid != "" {
+						numericMid, errMid := strconv.Atoi(mid)
+						if errMid == nil {
+							if numericMid > pc.greaterMid {
+								pc.greaterMid = numericMid
+							}
+						}
 
-					continue
+						continue
+					}
+					pc.greaterMid++
+					err = t.SetMid(strconv.Itoa(pc.greaterMid))
+					if err != nil {
+						return SessionDescription{}, err
+					}
 				}
-				pc.greaterMid++
-				err = t.SetMid(strconv.Itoa(pc.greaterMid))
-				if err != nil {
-					return SessionDescription{}, err
-				}
+			}
+
+			if pc.currentRemoteDescription == nil {
+				descr, err = pc.generateUnmatchedSDP(currentTransceivers, useIdentity)
+			} else {
+				descr, err = pc.generateMatchedSDP(
+					currentTransceivers,
+					useIdentity,
+					true, /*includeUnmatched */
+					connectionRoleFromDtlsRole(defaultDtlsRoleOffer),
+				)
+			}
+
+			if err != nil {
+				return SessionDescription{}, err
+			}
+
+			updateSDPOrigin(&pc.sdpOrigin, descr)
+			sdpBytes, err := descr.Marshal()
+			if err != nil {
+				return SessionDescription{}, err
+			}
+
+			offer = SessionDescription{
+				Type:   SDPTypeOffer,
+				SDP:    string(sdpBytes),
+				parsed: descr,
+			}
+
+			// Verify local media hasn't changed during offer
+			// generation. Recompute if necessary
+			if isPlanB || !pc.hasLocalDescriptionChanged(&offer) {
+				break
+			}
+			count++
+			if count >= 128 {
+				return SessionDescription{}, errExcessiveRetries
 			}
 		}
 
-		if pc.currentRemoteDescription == nil {
-			descr, err = pc.generateUnmatchedSDP(currentTransceivers, useIdentity)
-		} else {
-			descr, err = pc.generateMatchedSDP(
-				currentTransceivers,
-				useIdentity,
-				true, /*includeUnmatched */
-				connectionRoleFromDtlsRole(defaultDtlsRoleOffer),
-			)
-		}
+		pc.lastOffer = offer.SDP
 
-		if err != nil {
-			return SessionDescription{}, err
-		}
-
-		updateSDPOrigin(&pc.sdpOrigin, descr)
-		sdpBytes, err := descr.Marshal()
-		if err != nil {
-			return SessionDescription{}, err
-		}
-
-		offer = SessionDescription{
-			Type:   SDPTypeOffer,
-			SDP:    string(sdpBytes),
-			parsed: descr,
-		}
-
-		// Verify local media hasn't changed during offer
-		// generation. Recompute if necessary
-		if isPlanB || !pc.hasLocalDescriptionChanged(&offer) {
-			break
-		}
-		count++
-		if count >= 128 {
-			return SessionDescription{}, errExcessiveRetries
-		}
+		return offer, nil
 	}
-
-	pc.lastOffer = offer.SDP
-
-	return offer, nil
 }
 
 func (pc *PeerConnection) createICEGatherer() (*ICEGatherer, error) {
@@ -835,7 +846,7 @@ func (pc *PeerConnection) createICETransport() *ICETransport {
 // CreateAnswer starts the PeerConnection and generates the localDescription.
 //
 //nolint:cyclop
-func (pc *PeerConnection) CreateAnswer(*AnswerOptions) (SessionDescription, error) {
+func (pc *PeerConnection) CreateAnswer(options *AnswerOptions) (SessionDescription, error) {
 	useIdentity := pc.idpLoginURL != nil
 	remoteDesc := pc.RemoteDescription()
 	switch {
@@ -861,6 +872,12 @@ func (pc *PeerConnection) CreateAnswer(*AnswerOptions) (SessionDescription, erro
 			connectionRole = connectionRoleFromDtlsRole(DTLSRoleServer)
 		}
 	}
+
+	// If ICETrickle is specified, enable ICE trickle in the setting engine
+	if options != nil && options.ICETrickle {
+		pc.api.settingEngine.EnableICETrickle(true)
+	}
+
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
@@ -2762,6 +2779,7 @@ func (pc *PeerConnection) generateUnmatchedSDP(
 		pc.ICEGatheringState(),
 		nil,
 		pc.api.settingEngine.getSCTPMaxMessageSize(),
+		pc.api.settingEngine.iceTrickle,
 	)
 }
 
@@ -2929,6 +2947,7 @@ func (pc *PeerConnection) generateMatchedSDP(
 		pc.ICEGatheringState(),
 		bundleGroup,
 		pc.api.settingEngine.getSCTPMaxMessageSize(),
+		pc.api.settingEngine.iceTrickle,
 	)
 }
 

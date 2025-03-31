@@ -658,6 +658,7 @@ func populateSDP(
 	iceGatheringState ICEGatheringState,
 	matchBundleGroup *string,
 	sctpMaxMessageSize uint32,
+	enableICETrickle bool,
 ) (*sdp.SessionDescription, error) {
 	var err error
 	mediaDtlsFingerprints := []DTLSFingerprint{}
@@ -735,6 +736,11 @@ func populateSDP(
 	if isICELite {
 		// RFC 5245 S15.3
 		descr = descr.WithValueAttribute(sdp.AttrKeyICELite, "")
+	}
+
+	if enableICETrickle {
+		// RFC 8838 - Indicates support for ICE Trickle
+		descr = descr.WithValueAttribute("ice-options", "trickle")
 	}
 
 	if isExtmapAllowMixed {

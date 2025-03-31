@@ -23,3 +23,32 @@ func (sd *SessionDescription) Unmarshal() (*sdp.SessionDescription, error) {
 
 	return sd.parsed, err
 }
+
+// SupportsICETrickle returns true if the SDP contains the "a=ice-options:trickle" line,
+// indicating support for ICE trickle as per RFC 8838.
+func (sd *SessionDescription) SupportsICETrickle() bool {
+	if sd.parsed == nil {
+		_, err := sd.Unmarshal()
+		if err != nil {
+			return false
+		}
+	}
+
+	// Check for trickle in the session-level ice-options
+	for _, attr := range sd.parsed.Attributes {
+		if attr.Key == "ice-options" && attr.Value == "trickle" {
+			return true
+		}
+	}
+
+	// Also check in each media description, as it could be there as well
+	for _, mediaDesc := range sd.parsed.MediaDescriptions {
+		for _, attr := range mediaDesc.Attributes {
+			if attr.Key == "ice-options" && attr.Value == "trickle" {
+				return true
+			}
+		}
+	}
+
+	return false
+}

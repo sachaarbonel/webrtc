@@ -9,6 +9,11 @@ type OfferAnswerOptions struct {
 	// VoiceActivityDetection allows the application to provide information
 	// about whether it wishes voice detection feature to be enabled or disabled.
 	VoiceActivityDetection bool
+
+	// ICETrickle indicates whether ICE trickling is supported.
+	// When true, the a=ice-options:trickle attribute will be added to the SDP.
+	// See RFC 8838 for details: https://datatracker.ietf.org/doc/html/rfc8838
+	ICETrickle bool
 }
 
 // AnswerOptions structure describes the options used to control the answer

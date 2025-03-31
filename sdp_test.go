@@ -10,6 +10,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -618,6 +619,7 @@ func TestMediaDescriptionFingerprints(t *testing.T) {
 				ICEGatheringStateNew,
 				nil,
 				0,
+				false,
 			)
 			assert.NoError(t, err)
 
@@ -672,6 +674,7 @@ func TestPopulateSDP(t *testing.T) { //nolint:cyclop,maintidx
 			ICEGatheringStateComplete,
 			nil,
 			se.getSCTPMaxMessageSize(),
+			se.iceTrickle,
 		)
 		assert.Nil(t, err)
 
@@ -731,6 +734,7 @@ func TestPopulateSDP(t *testing.T) { //nolint:cyclop,maintidx
 			ICEGatheringStateComplete,
 			nil,
 			se.getSCTPMaxMessageSize(),
+			se.iceTrickle,
 		)
 		assert.Nil(t, err)
 
@@ -771,6 +775,7 @@ func TestPopulateSDP(t *testing.T) { //nolint:cyclop,maintidx
 			ICEGatheringStateComplete,
 			nil,
 			se.getSCTPMaxMessageSize(),
+			se.iceTrickle,
 		)
 		assert.Nil(t, err)
 
@@ -829,6 +834,7 @@ func TestPopulateSDP(t *testing.T) { //nolint:cyclop,maintidx
 			ICEGatheringStateComplete,
 			nil,
 			se.getSCTPMaxMessageSize(),
+			se.iceTrickle,
 		)
 		assert.NoError(t, err)
 
@@ -862,6 +868,7 @@ func TestPopulateSDP(t *testing.T) { //nolint:cyclop,maintidx
 			ICEGatheringStateComplete,
 			nil,
 			se.getSCTPMaxMessageSize(),
+			se.iceTrickle,
 		)
 		assert.Nil(t, err)
 
@@ -892,6 +899,7 @@ func TestPopulateSDP(t *testing.T) { //nolint:cyclop,maintidx
 			ICEGatheringStateComplete,
 			nil,
 			se.getSCTPMaxMessageSize(),
+			se.iceTrickle,
 		)
 		assert.Nil(t, err)
 
@@ -907,6 +915,57 @@ func TestPopulateSDP(t *testing.T) { //nolint:cyclop,maintidx
 			}
 		}
 		assert.Equal(t, false, found, "AllowMixedExtMap key should not be present")
+	})
+	t.Run("ice-trickle", func(t *testing.T) {
+		se := SettingEngine{}
+		se.EnableICETrickle(true)
+
+		offerSdp, err := populateSDP(
+			&sdp.SessionDescription{},
+			false,
+			[]DTLSFingerprint{},
+			se.sdpMediaLevelFingerprints,
+			se.candidates.ICELite,
+			true,
+			&MediaEngine{},
+			connectionRoleFromDtlsRole(defaultDtlsRoleOffer),
+			[]ICECandidate{},
+			ICEParameters{},
+			[]mediaSection{},
+			ICEGatheringStateComplete,
+			nil,
+			se.getSCTPMaxMessageSize(),
+			se.iceTrickle,
+		)
+		assert.Nil(t, err)
+
+		var found bool
+		// ice-options:trickle is a session-level attribute
+		for _, a := range offerSdp.Attributes {
+			if a.Key == "ice-options" && a.Value == "trickle" {
+				found = true
+				break
+			}
+		}
+		assert.Equal(t, true, found, "ice-options:trickle should be present")
+
+		// Test SessionDescription.SupportsICETrickle
+		_, err = offerSdp.Marshal()
+		assert.Nil(t, err)
+
+		// Ensure the SDP has the required fields
+		validSDP := fmt.Sprintf(`v=0
+o=- 0 0 IN IP4 0.0.0.0
+s=-
+c=IN IP4 0.0.0.0
+t=0 0
+a=ice-options:trickle
+`)
+		sd := SessionDescription{
+			Type: SDPTypeOffer,
+			SDP:  validSDP,
+		}
+		assert.Equal(t, true, sd.SupportsICETrickle(), "SupportsICETrickle should return true")
 	})
 	t.Run("bundle all", func(t *testing.T) {
 		se := SettingEngine{}
@@ -936,6 +995,7 @@ func TestPopulateSDP(t *testing.T) { //nolint:cyclop,maintidx
 			ICEGatheringStateComplete,
 			nil,
 			se.getSCTPMaxMessageSize(),
+			se.iceTrickle,
 		)
 		assert.Nil(t, err)
 
@@ -976,6 +1036,7 @@ func TestPopulateSDP(t *testing.T) { //nolint:cyclop,maintidx
 			ICEGatheringStateComplete,
 			&matchedBundle,
 			se.getSCTPMaxMessageSize(),
+			se.iceTrickle,
 		)
 		assert.Nil(t, err)
 
@@ -1018,6 +1079,7 @@ func TestPopulateSDP(t *testing.T) { //nolint:cyclop,maintidx
 			ICEGatheringStateComplete,
 			&matchedBundle,
 			se.getSCTPMaxMessageSize(),
+			se.iceTrickle,
 		)
 		assert.Nil(t, err)
 
