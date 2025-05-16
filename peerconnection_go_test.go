@@ -15,6 +15,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"math/big"
+	"net"
 	"regexp"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/pion/dtls/v3"
 	"github.com/pion/ice/v4"
+	"github.com/pion/logging"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/transport/v3/test"
@@ -1839,4 +1841,167 @@ func Test_WriteRTCP_Disconnected(t *testing.T) {
 	)
 
 	assert.NoError(t, peerConnection.Close())
+}
+
+func Test_IPv6(t *testing.T) { //nolint: cyclop
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Skip()
+	}
+
+	IPv6Supported := false
+	for _, iface := range interfaces {
+		addrs, netErr := iface.Addrs()
+		if netErr != nil {
+			continue
+		}
+
+		// Loop over the addresses for the interface.
+		for _, addr := range addrs {
+			var ip net.IP
+
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			if ip == nil || ip.To4() != nil || ip.IsLinkLocalUnicast() || ip.IsLoopback() {
+				continue
+			}
+
+			IPv6Supported = true
+		}
+	}
+
+	if !IPv6Supported {
+		t.Skip()
+	}
+
+	lim := test.TimeOut(time.Second * 5)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	settingEngine := SettingEngine{}
+	settingEngine.SetNetworkTypes([]NetworkType{NetworkTypeUDP6})
+
+	offerPC, answerPC, err := NewAPI(WithSettingEngine(settingEngine)).newPair(Configuration{})
+	assert.NoError(t, err)
+
+	peerConnectionConnected := untilConnectionState(PeerConnectionStateConnected, offerPC, answerPC)
+	assert.NoError(t, signalPair(offerPC, answerPC))
+
+	peerConnectionConnected.Wait()
+
+	offererSelectedPair, err := offerPC.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
+	assert.NoError(t, err)
+	assert.NotNil(t, offererSelectedPair)
+
+	answererSelectedPair, err := answerPC.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
+	assert.NoError(t, err)
+	assert.NotNil(t, answererSelectedPair)
+
+	for _, c := range []*ICECandidate{
+		answererSelectedPair.Local,
+		answererSelectedPair.Remote,
+		offererSelectedPair.Local,
+		offererSelectedPair.Remote,
+	} {
+		iceCandidate, err := c.ToICE()
+		assert.NoError(t, err)
+		assert.Equal(t, iceCandidate.NetworkType(), ice.NetworkTypeUDP6)
+	}
+
+	closePairNow(t, offerPC, answerPC)
+}
+
+type testICELogger struct {
+	lastErrorMessage string
+}
+
+func (t *testICELogger) Trace(string)                  {}
+func (t *testICELogger) Tracef(string, ...interface{}) {}
+func (t *testICELogger) Debug(string)                  {}
+func (t *testICELogger) Debugf(string, ...interface{}) {}
+func (t *testICELogger) Info(string)                   {}
+func (t *testICELogger) Infof(string, ...interface{})  {}
+func (t *testICELogger) Warn(string)                   {}
+func (t *testICELogger) Warnf(string, ...interface{})  {}
+func (t *testICELogger) Error(msg string)              { t.lastErrorMessage = msg }
+func (t *testICELogger) Errorf(format string, args ...interface{}) {
+	t.lastErrorMessage = fmt.Sprintf(format, args...)
+}
+
+type testICELoggerFactory struct {
+	logger *testICELogger
+}
+
+func (t *testICELoggerFactory) NewLogger(string) logging.LeveledLogger {
+	return t.logger
+}
+
+func TestAddICECandidate__DroppingOldGenerationCandidates(t *testing.T) {
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	testLogger := &testICELogger{}
+	loggerFactory := &testICELoggerFactory{logger: testLogger}
+
+	// Create a new API with the custom logger
+	api := NewAPI(WithSettingEngine(SettingEngine{
+		LoggerFactory: loggerFactory,
+	}))
+
+	pc, err := api.NewPeerConnection(Configuration{})
+	assert.NoError(t, err)
+
+	_, err = pc.CreateDataChannel("test", nil)
+	assert.NoError(t, err)
+
+	offer, err := pc.CreateOffer(nil)
+	assert.NoError(t, err)
+
+	offerGatheringComplete := GatheringCompletePromise(pc)
+	assert.NoError(t, pc.SetLocalDescription(offer))
+	<-offerGatheringComplete
+
+	remotePC, err := api.NewPeerConnection(Configuration{})
+	assert.NoError(t, err)
+
+	assert.NoError(t, remotePC.SetRemoteDescription(offer))
+
+	remoteDesc := remotePC.RemoteDescription()
+	assert.NotNil(t, remoteDesc)
+
+	ufrag, hasUfrag := remoteDesc.parsed.MediaDescriptions[0].Attribute("ice-ufrag")
+	assert.True(t, hasUfrag)
+
+	emptyUfragCandidate := ICECandidateInit{
+		Candidate: "candidate:1 1 UDP 2122252543 192.168.1.1 12345 typ host",
+	}
+	err = remotePC.AddICECandidate(emptyUfragCandidate)
+	assert.NoError(t, err)
+	assert.Empty(t, testLogger.lastErrorMessage)
+
+	validCandidate := ICECandidateInit{
+		Candidate: fmt.Sprintf("candidate:1 1 UDP 2122252543 192.168.1.1 12345 typ host ufrag %s", ufrag),
+	}
+	err = remotePC.AddICECandidate(validCandidate)
+	assert.NoError(t, err)
+	assert.Empty(t, testLogger.lastErrorMessage)
+
+	invalidCandidate := ICECandidateInit{
+		Candidate: "candidate:1 1 UDP 2122252543 192.168.1.1 12345 typ host ufrag invalid",
+	}
+	err = remotePC.AddICECandidate(invalidCandidate)
+	assert.NoError(t, err)
+	assert.Contains(t, testLogger.lastErrorMessage, "dropping candidate with ufrag")
+
+	closePairNow(t, pc, remotePC)
 }

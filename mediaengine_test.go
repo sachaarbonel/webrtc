@@ -575,21 +575,71 @@ func TestMediaEngineHeaderExtensionDirection(t *testing.T) {
 
 // If a user attempts to register a codec twice we should just discard duplicate calls.
 func TestMediaEngineDoubleRegister(t *testing.T) {
-	mediaEngine := MediaEngine{}
+	t.Run("Same Codec", func(t *testing.T) {
+		mediaEngine := MediaEngine{}
 
-	assert.NoError(t, mediaEngine.RegisterCodec(
-		RTPCodecParameters{
-			RTPCodecCapability: RTPCodecCapability{MimeTypeOpus, 48000, 0, "", nil},
-			PayloadType:        111,
-		}, RTPCodecTypeAudio))
+		assert.NoError(t, mediaEngine.RegisterCodec(
+			RTPCodecParameters{
+				RTPCodecCapability: RTPCodecCapability{MimeTypeOpus, 48000, 0, "", nil},
+				PayloadType:        111,
+			}, RTPCodecTypeAudio))
 
-	assert.NoError(t, mediaEngine.RegisterCodec(
-		RTPCodecParameters{
-			RTPCodecCapability: RTPCodecCapability{MimeTypeOpus, 48000, 0, "", nil},
-			PayloadType:        111,
-		}, RTPCodecTypeAudio))
+		assert.NoError(t, mediaEngine.RegisterCodec(
+			RTPCodecParameters{
+				RTPCodecCapability: RTPCodecCapability{MimeTypeOpus, 48000, 0, "", nil},
+				PayloadType:        111,
+			}, RTPCodecTypeAudio))
 
-	assert.Equal(t, len(mediaEngine.audioCodecs), 1)
+		assert.Equal(t, len(mediaEngine.audioCodecs), 1)
+	})
+
+	t.Run("Case Insensitive Audio Codec", func(t *testing.T) {
+		mediaEngine := MediaEngine{}
+
+		assert.NoError(t, mediaEngine.RegisterCodec(
+			RTPCodecParameters{
+				RTPCodecCapability: RTPCodecCapability{"audio/OPUS", 48000, 0, "", nil},
+				PayloadType:        111,
+			}, RTPCodecTypeAudio))
+
+		assert.NoError(t, mediaEngine.RegisterCodec(
+			RTPCodecParameters{
+				RTPCodecCapability: RTPCodecCapability{"audio/opus", 48000, 0, "", nil},
+				PayloadType:        111,
+			}, RTPCodecTypeAudio))
+
+		assert.Equal(t, len(mediaEngine.audioCodecs), 1)
+	})
+
+	t.Run("Case Insensitive Video Codec", func(t *testing.T) {
+		mediaEngine := MediaEngine{}
+
+		assert.NoError(t, mediaEngine.RegisterCodec(
+			RTPCodecParameters{
+				RTPCodecCapability: RTPCodecCapability{strings.ToUpper(MimeTypeRTX), 90000, 0, "", nil},
+				PayloadType:        98,
+			}, RTPCodecTypeVideo))
+		assert.NoError(t, mediaEngine.RegisterCodec(
+			RTPCodecParameters{
+				RTPCodecCapability: RTPCodecCapability{MimeTypeRTX, 90000, 0, "", nil},
+				PayloadType:        98,
+			}, RTPCodecTypeVideo))
+		assert.NoError(t, mediaEngine.RegisterCodec(
+			RTPCodecParameters{
+				RTPCodecCapability: RTPCodecCapability{strings.ToUpper(MimeTypeFlexFEC), 90000, 0, "", nil},
+				PayloadType:        100,
+			}, RTPCodecTypeVideo))
+		assert.NoError(t, mediaEngine.RegisterCodec(
+			RTPCodecParameters{
+				RTPCodecCapability: RTPCodecCapability{MimeTypeFlexFEC, 90000, 0, "", nil},
+				PayloadType:        100,
+			}, RTPCodecTypeVideo))
+		assert.Equal(t, len(mediaEngine.videoCodecs), 2)
+		isRTX := mediaEngine.isRTXEnabled(RTPCodecTypeVideo, []RTPTransceiverDirection{RTPTransceiverDirectionRecvonly})
+		assert.True(t, isRTX)
+		isFEC := mediaEngine.isFECEnabled(RTPCodecTypeVideo, []RTPTransceiverDirection{RTPTransceiverDirectionRecvonly})
+		assert.True(t, isFEC)
+	})
 }
 
 // If a user attempts to register a codec with same payload but with different
@@ -894,5 +944,70 @@ a=rtcp-fb:96 nack
 
 	t.Run("sendrecv", func(t *testing.T) {
 		runTest(t, true)
+	})
+}
+
+func TestMultiCodecNegotiation(t *testing.T) {
+	const offerSdp = `v=0
+o=- 781500112831855234 6 IN IP4 127.0.0.1
+s=-
+t=0 0
+a=group:BUNDLE 0 1 2 3
+a=extmap-allow-mixed
+a=msid-semantic: WMS be0216be-f3d8-40ca-a624-379edf70f1c9
+m=application 53555 UDP/DTLS/SCTP webrtc-datachannel
+a=mid:0
+a=sctp-port:5000
+a=max-message-size:262144
+m=video 9 UDP/TLS/RTP/SAVPF 98
+a=mid:1
+a=sendonly
+a=msid:be0216be-f3d8-40ca-a624-379edf70f1c9 3d032b3b-ffe5-48ec-b783-21375668d1c3
+a=rtcp-mux
+a=rtcp-rsize
+a=rtpmap:98 VP9/90000
+a=rtcp-fb:98 goog-remb
+a=rtcp-fb:98 transport-cc
+a=rtcp-fb:98 ccm fir
+a=rtcp-fb:98 nack
+a=rtcp-fb:98 nack pli
+a=fmtp:98 profile-id=0
+a=rid:q send
+a=rid:h send
+a=simulcast:send q;h
+m=video 9 UDP/TLS/RTP/SAVPF 96
+a=mid:2
+a=sendonly
+a=msid:6ff05509-be96-4ef1-a74f-425e14720983 16d5d7fe-d076-4718-9ca9-ec62b4543727
+a=rtcp-mux
+a=rtcp-rsize
+a=rtpmap:96 VP8/90000
+a=rtcp-fb:96 goog-remb
+a=rtcp-fb:96 transport-cc
+a=rtcp-fb:96 ccm fir
+a=rtcp-fb:96 nack
+a=rtcp-fb:96 nack pli
+a=ssrc:4281768245 cname:JDM9GNMEg+9To6K7
+a=ssrc:4281768245 msid:6ff05509-be96-4ef1-a74f-425e14720983 16d5d7fe-d076-4718-9ca9-ec62b4543727
+`
+	mustParse := func(raw string) sdp.SessionDescription {
+		s := sdp.SessionDescription{}
+		assert.NoError(t, s.Unmarshal([]byte(raw)))
+
+		return s
+	}
+	t.Run("Multi codec negotiation disabled", func(t *testing.T) {
+		mediaEngine := MediaEngine{}
+		assert.NoError(t, mediaEngine.RegisterDefaultCodecs())
+		assert.NoError(t, mediaEngine.updateFromRemoteDescription(mustParse(offerSdp)))
+		assert.Len(t, mediaEngine.negotiatedVideoCodecs, 1)
+	})
+	t.Run("Multi codec negotiation enabled", func(t *testing.T) {
+		mediaEngine := MediaEngine{}
+		mediaEngine.setMultiCodecNegotiation(true)
+		assert.True(t, mediaEngine.multiCodecNegotiation())
+		assert.NoError(t, mediaEngine.RegisterDefaultCodecs())
+		assert.NoError(t, mediaEngine.updateFromRemoteDescription(mustParse(offerSdp)))
+		assert.Len(t, mediaEngine.negotiatedVideoCodecs, 2)
 	})
 }

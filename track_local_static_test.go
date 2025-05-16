@@ -425,3 +425,44 @@ func Test_TrackLocalStatic_Payloader(t *testing.T) {
 
 	closePairNow(t, offerer, answerer)
 }
+
+func Test_TrackLocalStatic_Timestamp(t *testing.T) {
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	initialTimestamp := uint32(12345)
+	track, err := NewTrackLocalStaticSample(
+		RTPCodecCapability{MimeType: MimeTypeVP8},
+		"video",
+		"pion",
+		WithRTPTimestamp(initialTimestamp),
+	)
+	assert.NoError(t, err)
+
+	pcOffer, pcAnswer, err := newPair()
+	assert.NoError(t, err)
+
+	_, err = pcOffer.AddTrack(track)
+	assert.NoError(t, err)
+
+	onTrackFired, onTrackFiredFunc := context.WithCancel(context.Background())
+	pcAnswer.OnTrack(func(trackRemote *TrackRemote, _ *RTPReceiver) {
+		pkt, _, err := trackRemote.ReadRTP()
+		assert.NoError(t, err)
+		assert.GreaterOrEqual(t, pkt.Timestamp, initialTimestamp)
+		// not accurate, but some grace period for slow CI test runners.
+		assert.LessOrEqual(t, pkt.Timestamp, initialTimestamp+100000)
+
+		onTrackFiredFunc()
+	})
+
+	assert.NoError(t, signalPair(pcOffer, pcAnswer))
+
+	sendVideoUntilDone(t, onTrackFired.Done(), []*TrackLocalStaticSample{track})
+
+	<-onTrackFired.Done()
+	closePairNow(t, pcOffer, pcAnswer)
+}
